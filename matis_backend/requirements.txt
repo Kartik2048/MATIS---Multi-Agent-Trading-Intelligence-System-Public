@@ -1,0 +1,13 @@
+# MATIS v3 — Requirements
+fastapi
+uvicorn[standard]
+langgraph
+langchain-core
+langchain-nvidia-ai-endpoints
+python-dotenv
+pydantic
+requests
+pandas
+numpy
+httpx
+websockets
