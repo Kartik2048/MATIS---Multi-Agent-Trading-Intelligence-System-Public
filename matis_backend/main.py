@@ -25,7 +25,8 @@ from graph import matis_app
 from database import (
     init_db, get_portfolio, get_asset_balance, execute_trade,
     get_trade_history, reset_portfolio, get_asset_cost_basis,
-    INITIAL_INR_BALANCE, get_connection, SUPPORTED_ASSETS
+    INITIAL_INR_BALANCE, get_connection, SUPPORTED_ASSETS,
+    get_executed_trades_count
 )
 from indicators import calculate_indicators, build_semantic_payload
 from ml_database import (
@@ -39,23 +40,148 @@ from price_feed import price_feed, ws_price_handler, live_prices, get_inr_price,
 SERVER_START_TIME = time.time()
 
 
+import httpx
+import xml.etree.ElementTree as ET
+from typing import Optional
+
+# ============================================================
+#  CRYPTO NEWS & TELEGRAM NOTIFIER
+# ============================================================
+def fetch_latest_crypto_news(asset: str = "BTC") -> str:
+    """Fetch live crypto headlines from Decrypt RSS."""
+    try:
+        resp = httpx.get("https://decrypt.co/feed", timeout=8)
+        if resp.status_code == 200:
+            root = ET.fromstring(resp.content)
+            items = root.findall(".//item")
+            titles = [item.find("title").text for item in items[:5] if item.find("title") is not None]
+            if titles:
+                return "\n".join(titles)
+    except Exception as e:
+        print(f"[NEWS] ⚠️ Failed to fetch RSS: {e}")
+    return f"Live market monitoring for {asset}. General crypto market conditions active."
+
+
+def send_telegram_alert(trade: dict):
+    """Send formatted boardroom alert to Telegram if credentials are set in .env. Strictly for BUY or SELL."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+
+    action = str(trade.get("action", "HOLD")).strip().upper()
+    status = str(trade.get("status", "HOLD")).strip().upper()
+
+    # STRICT: Only send notification on BUY or SELL
+    if action not in ["BUY", "SELL"] or status == "HOLD":
+        return
+
+    asset = trade.get("asset", "N/A")
+    price = trade.get("execution_price_inr", 0.0)
+    value = trade.get("trade_value_inr", 0.0)
+    confidence = trade.get("confidence", 0)
+    sentiment = trade.get("news_sentiment", 0.5)
+    reasoning = trade.get("reasoning", "")
+
+    emoji = "🟢" if action == "BUY" else "🔴"
+    status_tag = "✅ EXECUTED" if status == "EXECUTED" else f"⚠️ {status}"
+
+    text = (
+        f"🚨 MATIS Boardroom Report 🚨\n\n"
+        f"🧠 STRATEGIST (Proposal):\n{reasoning}\n\n"
+        f"📰 SENTINEL (News Sentiment): {sentiment:.2f}\n\n"
+        f"⚖️ RISK MANAGER:\n"
+        f"{emoji} Action: {action} {asset}\n"
+        f"Status: {status_tag}\n"
+        f"Fill Price: ₹{price:,.2f}\n"
+        f"Trade Value: ₹{value:,.2f}\n"
+        f"Confidence: {confidence}%"
+    )
+
+    try:
+        httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=8
+        )
+        print(f"[TELEGRAM] 📱 Alert sent to chat {chat_id}")
+    except Exception as e:
+        print(f"[TELEGRAM] ⚠️ Failed to send alert: {e}")
+
+
+# ============================================================
+#  AUTONOMOUS SCHEDULER (Concurrent Full Basket via Semaphore)
+# ============================================================
+_scheduler_running = False
+_scheduler_task = None
+
+async def evaluate_asset_with_semaphore(asset: str, sem: asyncio.Semaphore):
+    """Evaluates an individual asset with concurrency controlled by semaphore."""
+    async with sem:
+        try:
+            print(f"[SCHEDULER] ⚡ Deliberating on {asset} (Acquired semaphore slot)...")
+            news = await run_in_threadpool(fetch_latest_crypto_news, asset)
+            await run_in_threadpool(run_matis_pipeline, asset, news)
+            print(f"[SCHEDULER] ✅ Deliberation completed for {asset}.")
+        except Exception as e:
+            print(f"[SCHEDULER] ⚠️ Error evaluating {asset}: {e}")
+
+
+async def autonomous_scheduler_loop():
+    """Every 5 minutes, evaluates ALL supported assets concurrently, controlled by a semaphore."""
+    global _scheduler_running
+    interval = int(os.getenv("AUTO_EVALUATE_INTERVAL_SECONDS", "300"))
+    max_concurrency = int(os.getenv("MAX_CONCURRENT_EVALUATIONS", "2"))
+    sem = asyncio.Semaphore(max_concurrency)
+
+    print(f"[SCHEDULER] 🤖 Autonomous AI Trading active: Evaluating ALL {len(SUPPORTED_ASSETS)} assets every {interval}s (Concurrency Semaphore: {max_concurrency})")
+    # Wait 8s after startup so price feed is populated
+    await asyncio.sleep(8)
+
+    while _scheduler_running:
+        print(f"\n{'#'*65}")
+        print(f" [SCHEDULER] 🚀 Starting Full Basket Deliberation Cycle ({', '.join(SUPPORTED_ASSETS)})")
+        print(f"{'#'*65}")
+
+        # Evaluate all assets concurrently via semaphore
+        tasks = [evaluate_asset_with_semaphore(asset, sem) for asset in SUPPORTED_ASSETS]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        print(f"\n[SCHEDULER] 🏁 All {len(SUPPORTED_ASSETS)} assets evaluated. Next full cycle in {interval}s ({interval//60} mins).\n")
+
+        # Sleep in small slices to allow clean and responsive server shutdown
+        for _ in range(interval):
+            if not _scheduler_running:
+                break
+            await asyncio.sleep(1)
+
+
 # ============================================================
 #  LIFESPAN — replaces deprecated @app.on_event
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init DBs + start CoinDCX price feed. Shutdown: stop feed."""
+    """Startup: init DBs + start CoinDCX price feed + start scheduler. Shutdown: stop."""
+    global _scheduler_running, _scheduler_task
     init_db()
     init_ml_db()
     await price_feed.start()
+
+    # Start autonomous trading loop if enabled (default true)
+    if os.getenv("AUTO_TRADING", "true").lower() == "true":
+        _scheduler_running = True
+        _scheduler_task = asyncio.create_task(autonomous_scheduler_loop())
+
     yield
+
+    _scheduler_running = False
+    if _scheduler_task:
+        _scheduler_task.cancel()
     await price_feed.stop()
 
 
 app = FastAPI(title="MATIS Brain API", lifespan=lifespan)
 
-
-from typing import Optional
 
 # --- N8n Payload Model ---
 class N8nPayload(BaseModel):
@@ -275,6 +401,9 @@ def run_matis_pipeline(asset: str, news: str):
     final_execution_details["post_trade_asset_balance"] = round(holdings.get(asset, 0.0), 8)
     final_execution_details["total_portfolio_value_inr"] = round(total_inr, 2)
     
+    # Send push notification to Telegram if enabled
+    send_telegram_alert(final_execution_details)
+
     return final_execution_details
 
 
@@ -294,7 +423,9 @@ async def trigger_evaluation(
     - mode=sync runs in a threadpool and waits for the result (for n8n).
     """
     asset_upper = asset.upper()
-    news_text = payload.news if payload else "No news available"
+    news_text = payload.news if (payload and payload.news and payload.news != "No news available") else None
+    if not news_text:
+        news_text = await run_in_threadpool(fetch_latest_crypto_news, asset_upper)
     
     if mode == "sync":
         # For n8n: Run the heavy synchronous LLM pipeline in a worker thread.
@@ -352,7 +483,7 @@ async def api_portfolio(current_price: float = 0.0, asset: str = "BTC"):
         "asset_market_value": round(asset_market_value, 2),
         "asset_pnl": round(asset_pnl, 2),
         "initial_balance": INITIAL_INR_BALANCE,
-        "total_trades": len(get_trade_history(limit=9999)),
+        "total_trades": get_executed_trades_count(),
         "supported_assets": SUPPORTED_ASSETS
     }
 
@@ -411,7 +542,7 @@ async def api_portfolio_summary():
         "global_unrealized_pnl": round(global_unrealized, 2),
         "initial_balance": INITIAL_INR_BALANCE,
         "asset_valuations": asset_valuations,
-        "total_trades": len(get_trade_history(limit=9999))
+        "total_trades": get_executed_trades_count()
     }
 
 
@@ -419,7 +550,11 @@ async def api_portfolio_summary():
 async def api_trades(limit: int = 50):
     """Returns the latest trade history entries."""
     trades = get_trade_history(limit=limit)
-    return {"trades": trades, "count": len(trades)}
+    return {
+        "trades": trades, 
+        "count": len(trades),
+        "executed_count": get_executed_trades_count()
+    }
 
 
 @app.get("/api/ml/trades")
@@ -476,12 +611,13 @@ async def api_system():
 
 
 # --- Serve the Dashboard ---
-app.mount("/static", StaticFiles(directory="static"), name="static")
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
 async def serve_dashboard():
     """Serve the main dashboard HTML."""
-    return FileResponse("static/index.html")
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
 if __name__ == "__main__":

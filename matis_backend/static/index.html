@@ -170,6 +170,33 @@
             background: var(--accent-red-bg);
         }
 
+        .btn-evaluate {
+            background: linear-gradient(135deg, var(--accent-blue), #8b5cf6);
+            border: 1px solid rgba(139, 92, 246, 0.4);
+            color: #fff;
+            padding: 8px 18px;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.25);
+            margin-left: auto;
+        }
+
+        .btn-evaluate:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 0 20px rgba(99, 102, 241, 0.5);
+            background: linear-gradient(135deg, #4f46e5, #7c3aed);
+        }
+
+        .btn-evaluate:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
         .uptime-chip {
             display: flex;
             align-items: center;
@@ -455,6 +482,27 @@
             color: #94a3b8;
         }
 
+        .badge-asset {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            background: rgba(99, 102, 241, 0.12);
+            color: #a5b4fc;
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            letter-spacing: 0.5px;
+        }
+        .badge-asset.btc { color: #f59e0b; background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.25); }
+        .badge-asset.eth { color: #a78bfa; background: rgba(167, 139, 250, 0.12); border-color: rgba(167, 139, 250, 0.25); }
+        .badge-asset.sol { color: #2dd4bf; background: rgba(45, 212, 191, 0.12); border-color: rgba(45, 212, 191, 0.25); }
+        .badge-asset.xrp { color: #38bdf8; background: rgba(56, 189, 248, 0.12); border-color: rgba(56, 189, 248, 0.25); }
+        .badge-asset.bnb { color: #eab308; background: rgba(234, 179, 8, 0.12); border-color: rgba(234, 179, 8, 0.25); }
+        .badge-asset.link { color: #60a5fa; background: rgba(96, 165, 250, 0.12); border-color: rgba(96, 165, 250, 0.25); }
+
         .mono {
             font-family: 'JetBrains Mono', monospace;
         }
@@ -597,6 +645,7 @@
                 <option value="LINK">LINK / INR</option>
             </select>
             <span class="live-price" id="livePrice">₹—</span>
+            <button class="btn-evaluate" id="btnEvaluate" title="Trigger immediate AI Boardroom deliberation">⚡ Analyze BTC Now</button>
             <span class="tag">PAPER TRADING</span>
         </div>
 
@@ -680,10 +729,11 @@
             <table>
                 <thead>
                     <tr>
-                        <th style="width:160px;">Time</th>
-                        <th style="width:70px;">Action</th>
+                        <th style="width:150px;">Time</th>
+                        <th style="width:85px;">Asset</th>
+                        <th style="width:85px;">Action</th>
                         <th style="width:120px;">Price</th>
-                        <th style="width:120px;">Asset / Size</th>
+                        <th style="width:100px;">Size</th>
                         <th style="width:110px;">Value (INR)</th>
                         <th style="width:110px;">Realized P&L</th>
                         <th style="width:90px;">Confidence</th>
@@ -692,7 +742,7 @@
                 </thead>
                 <tbody id="tradesBody">
                     <tr>
-                        <td colspan="8">
+                        <td colspan="9">
                             <div class="empty-state">
                                 <div class="icon">📡</div>
                                 <p>Waiting for trades from the MATIS agents...</p>
@@ -849,8 +899,39 @@
                 currentPrice = latestWSPrices[selectedAsset];
                 document.getElementById('livePrice').textContent = fmtINR(currentPrice);
             }
+            const btnEval = document.getElementById('btnEvaluate');
+            if (btnEval && !btnEval.disabled) {
+                btnEval.textContent = `⚡ Analyze ${selectedAsset} Now`;
+            }
             refresh();
         });
+
+        // Trigger AI evaluation button listener
+        const btnEvaluate = document.getElementById('btnEvaluate');
+        if (btnEvaluate) {
+            btnEvaluate.addEventListener('click', async () => {
+                btnEvaluate.disabled = true;
+                const asset = selectedAsset;
+                btnEvaluate.textContent = `⏳ Deliberating on ${asset}...`;
+                try {
+                    await fetch(`${API_BASE}/api/evaluate/${asset}?mode=async`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ asset: asset })
+                    });
+                    setTimeout(refresh, 3500);
+                    setTimeout(refresh, 7000);
+                    setTimeout(refresh, 12000);
+                } catch(e) {
+                    console.error('Failed to trigger evaluation', e);
+                } finally {
+                    setTimeout(() => {
+                        btnEvaluate.disabled = false;
+                        btnEvaluate.textContent = `⚡ Analyze ${selectedAsset} Now`;
+                    }, 6000);
+                }
+            });
+        }
 
         // Filter listeners
         document.getElementById('filterAsset').addEventListener('change', fetchTrades);
@@ -926,13 +1007,17 @@
                 // Client-side filtering
                 if (filterAsset !== 'ALL') trades = trades.filter(t => t.asset === filterAsset);
                 if (filterAction !== 'ALL') trades = trades.filter(t => t.action === filterAction);
-                document.getElementById('tradeCountBadge').textContent = trades.length + ' trade' + (trades.length!==1?'s':'');
+                // Only count BUY and SELL trades (not HOLD) for executed trade count
+                const executedTrades = trades.filter(t => t.action === 'BUY' || t.action === 'SELL');
+                const displayCount = filterAction === 'ALL' ? executedTrades.length : trades.length;
+                const label = filterAction === 'ALL' ? ' executed trade' : ` ${filterAction} record`;
+                document.getElementById('tradeCountBadge').textContent = displayCount + label + (displayCount !== 1 ? 's' : '');
                 if (!trades.length) {
-                    document.getElementById('tradesBody').innerHTML = '<tr><td colspan="8"><div class="empty-state"><div class="icon">📡</div><p>No trades match the current filters.</p></div></td></tr>';
+                    document.getElementById('tradesBody').innerHTML = '<tr><td colspan="9"><div class="empty-state"><div class="icon">📡</div><p>No trades match the current filters.</p></div></td></tr>';
                     return;
                 }
-                const isNew = data.trades.length > lastTradeCount;
-                lastTradeCount = data.trades.length;
+                const isNew = executedTrades.length > lastTradeCount;
+                lastTradeCount = executedTrades.length;
                 let html = '';
                 trades.forEach((t, idx) => {
                     const isHold = t.action==='HOLD', isBuy = t.action==='BUY';
@@ -942,16 +1027,17 @@
                     const confColor = conf>=80?'var(--accent-green)':conf>=60?'var(--accent-yellow)':'var(--accent-red)';
                     const flash = (isNew&&idx===0)?'flash-row':'';
                     const amt = t.amount||t.amount_btc||0;
-                    const asset = t.asset||'BTC';
+                    const asset = (t.asset||'BTC').toUpperCase();
                     const rpl = t.realized_profit || 0;
                     const rplDisplay = isHold ? '—' : ((rpl >= 0 ? '+' : '') + fmtINR(rpl));
                     const rplClass = isHold ? '' : fmtPnlClass(rpl);
                     html += `<tr class="${flash}">
                         <td class="mono" style="font-size:12px;color:var(--text-muted)">${fmtTime(t.timestamp)}</td>
+                        <td><span class="badge-asset ${asset.toLowerCase()}">${asset}</span></td>
                         <td><span class="badge ${badge}">${arrow} ${t.action}</span></td>
                         <td class="mono">${fmtINR(t.execution_price)}</td>
-                        <td class="mono">${isHold?'—':(fmtQty(amt)+' '+asset)}</td>
-                        <td class="mono">${isHold?'—':fmtINR(t.total_value_inr)}</td>
+                        <td class="mono">${isHold ? '—' : fmtQty(amt)}</td>
+                        <td class="mono">${isHold ? '—' : fmtINR(t.total_value_inr)}</td>
                         <td class="mono ${rplClass}">${rplDisplay}</td>
                         <td><div class="confidence-bar"><span class="mono" style="font-size:12px">${conf}%</span><div class="confidence-track"><div class="confidence-fill" style="width:${conf}%;background:${confColor}"></div></div></div></td>
                         <td class="reasoning-cell">${t.reasoning||'—'}</td></tr>`;

@@ -11,3 +11,5 @@ pandas
 numpy
 httpx
 websockets
+pytest
+pytest-asyncio

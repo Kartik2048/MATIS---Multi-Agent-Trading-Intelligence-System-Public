@@ -15,6 +15,18 @@ Version 3 is architected specifically for a native **Indian Rupee (INR)** tradin
 > [!TIP]
 > **Live Instance**: A live deployment running the single news sentiment score agent and Python conditional statements version is available at: **[https://matis.duckdns.org/](https://matis.duckdns.org/)**
 
+> [!NOTE]
+> **Technical Documentation**: In-depth modular guides are available in the [`docs/`](docs/README.md) directory:
+> - [01. Project Overview](docs/01_overview.md)
+> - [02. System Architecture](docs/02_system_architecture.md)
+> - [03. Multi-Agent Deliberation Pipeline](docs/03_multi_agent_pipeline.md)
+> - [04. Exchange Simulation & Accounting](docs/04_exchange_simulation_and_accounting.md)
+> - [05. Autonomous Scheduler & Concurrency](docs/05_autonomous_scheduler_and_concurrency.md)
+> - [06. Telemetry, Alerting & Automation](docs/06_telemetry_and_alerting.md)
+> - [07. Real-Time Web Dashboard](docs/07_web_dashboard.md)
+> - [08. API Reference](docs/08_api_reference.md)
+> - [09. Testing & Verification](docs/09_testing_and_verification.md)
+
 ---
 
 ## Table of Contents
@@ -28,10 +40,13 @@ Version 3 is architected specifically for a native **Indian Rupee (INR)** tradin
   - [5. Critic & Reflection Loop](#5-critic--reflection-loop)
   - [6. Risk Manager (Sizing & Constraint Enforcement)](#6-risk-manager-sizing--constraint-enforcement)
 - [Key Features](#key-features)
+- [Autonomous Basket Scheduler & Concurrency Control](#autonomous-basket-scheduler--concurrency-control)
+- [Filtered Telegram Alerting (BUY / SELL Only)](#filtered-telegram-alerting-buy--sell-only)
+- [Trade Counter & Execution Semantics](#trade-counter--execution-semantics)
 - [Simulated CoinDCX Exchange Engine](#simulated-coindcx-exchange-engine)
 - [Technical Indicator Engine](#technical-indicator-engine)
 - [Dual SQLite Database Architecture](#dual-sqlite-database-architecture)
-- [n8n Automation & Telegram Alerting](#n8n-automation--telegram-alerting)
+- [n8n Automation & External Webhooks](#n8n-automation--external-webhooks)
 - [Real-Time Web Dashboard](#real-time-web-dashboard)
 - [API Reference](#api-reference)
   - [REST Endpoints](#rest-endpoints)
@@ -54,20 +69,24 @@ flowchart TD
     subgraph MarketDataSources ["Market Data & Ingestion"]
         B_Klines["Binance API<br/>(5m Klines & BTC 24h Change)"]
         C_Ticker["CoinDCX Ticker API<br/>(Live INR & USDT Pairs)"]
-        RSS_Feeds["Crypto News RSS<br/>(Decrypt, CoinDesk, etc.)"]
+        RSS_Feeds["Crypto News Feeds<br/>(Google News RSS, Decrypt, CoinGecko)"]
     end
 
-    subgraph Automation ["Orchestration & Ingestion"]
-        n8n["n8n Automated Workflow<br/>(Every 7 Mins)"]
+    subgraph Automation ["Autonomous Schedulers & Orchestration"]
+        LOOP["Autonomous Basket Loop<br/>(Every 5 Mins, All 6 Assets)"]
+        SEM["asyncio.Semaphore(2)<br/>(Rate-Limit Throttler)"]
+        n8n["n8n Automated Workflow<br/>(Optional External Webhook)"]
+        RSS_Feeds --> LOOP
         RSS_Feeds --> n8n
+        LOOP --> SEM
     end
 
     subgraph BackendEngine ["FastAPI Brain API (Port 8000)"]
         PF["CoinDCX Price Feed<br/>(Async Loop + Exponential Backoff)"]
         C_Ticker --> PF
 
-        subgraph LangGraphPipeline ["LangGraph Multi-Agent Engine"]
-            S["1. Sentinel Node<br/>(LLaMA 3.3 70B Sentiment)"]
+        subgraph LangGraphPipeline ["LangGraph Multi-Agent Engine (Nemotron-3-Super-120B)"]
+            S["1. Sentinel Node<br/>(Sentiment Analysis & News Ingestion)"]
             SB["2. Semantic Builder<br/>(RVOL, Trend, BBands, Macro Gravity)"]
             ST["3. Strategist Node<br/>(Trade Formulation & Confidence)"]
             ROUTER{"Trade Router<br/>(Value >= ₹100 & != HOLD?)"}
@@ -82,7 +101,7 @@ flowchart TD
         end
 
         subgraph Persistence ["Dual SQLite Database"]
-            PT_DB[("matis_paper_trading.db<br/>• Portfolio Balance (₹)<br/>• Asset Holdings & Cost Basis<br/>• Trade History & Realized P&L")]
+            PT_DB[("matis_paper_trading.db<br/>• Portfolio Balance (₹)<br/>• Asset Holdings & Cost Basis<br/>• Executed BUY/SELL Ledger<br/>• Full Deliberation History")]
             ML_DB[("matis_ml_training.db<br/>• Full LLM Reasonings<br/>• Semantic Technical States<br/>• Critic Feedback<br/>• Equity Curve Snapshots")]
         end
 
@@ -92,14 +111,15 @@ flowchart TD
 
     subgraph UserInterfaces ["Monitoring & Alerting"]
         WS["WebSocket Stream<br/>(/ws/prices)"]
-        DASH["Vanilla JS Dashboard<br/>(Live Tickers, Equity Chart, P&L)"]
-        TG["Telegram Boardroom Bot<br/>(Rich Trade Reports)"]
+        DASH["Vanilla JS Dashboard<br/>(Live Tickers, Color-Coded Asset Badges, Equity Chart)"]
+        TG["Telegram Boardroom Alerts<br/>(Strict Filter: BUY/SELL Only)"]
     end
 
+    SEM -- "Evaluate Each Asset" --> S
     n8n -- "POST /api/evaluate/{asset}?mode=sync" --> S
     B_Klines --> SB
     PF --> WS --> DASH
-    BackendEngine -- "Trade JSON Response" --> n8n --> TG
+    RM -- "On BUY / SELL Only" --> TG
     PT_DB --> DASH
     ML_DB --> DASH
 ```
@@ -144,10 +164,11 @@ MATIS does not rely on a single, naive LLM prompt. Instead, it runs an orchestra
 ```
 
 ### 1. Sentinel (News Sentiment)
-- **Model**: `meta/llama-3.3-70b-instruct` via NVIDIA NIM.
-- Evaluates inbound news headlines parsed by the n8n ingestion pipeline.
+- **Model**: `nvidia/nemotron-3-super-120b-a12b` via NVIDIA NIM (configurable via `NVIDIA_MODEL`).
+- Evaluates inbound news headlines parsed by the automated scraper or external triggers.
 - Outputs a normalized sentiment score between `0.0` (extreme bearish/panic) and `1.0` (extreme bullish/euphoria).
-- Falls back gracefully to neutral `0.50` if headlines are empty or API rate limits occur.
+- Built-in 3-attempt exponential retry handler recovers cleanly from transient HTTP 503 ("Service temporarily overloaded") or rate limits.
+- Falls back gracefully to neutral `0.50` if headlines are empty or API quotas are exhausted.
 
 ### 2. Semantic Builder (Indicator Translation)
 - LLMs struggle to reason accurately over raw floating-point numbers. The Semantic Builder is a deterministic translation layer that converts math into structured domain intelligence:
@@ -158,7 +179,7 @@ MATIS does not rely on a single, naive LLM prompt. Instead, it runs an orchestra
   - **BTC Macro Gravity**: Benchmarks altcoin performance against Bitcoin's 24-hour price change (*"Bullish Market Gravity"* vs. *"Bearish Market Gravity"*).
 
 ### 3. Strategist (Trade Proposal)
-- **Model**: `meta/llama-3.3-70b-instruct` (Temperature: `0.1`).
+- **Model**: `nvidia/nemotron-3-super-120b-a12b` (Temperature: `0.1`).
 - Considers the entire semantic market package, available INR cash balance, and existing asset holdings.
 - Proposes a concrete action (`BUY`, `SELL`, `HOLD`), an integer confidence score (`0` to `100`), an allocation percentage (`0%` to `100%`), and an exhaustive rationale.
 - Implements self-healing retry parsing to enforce strict JSON schemas without runtime exceptions.
@@ -168,7 +189,7 @@ MATIS does not rely on a single, naive LLM prompt. Instead, it runs an orchestra
   - If the action is `HOLD`, or if the proposed trade value is below the ₹100 minimum threshold, the router **bypasses the Critic entirely** and transitions immediately to the Risk Manager.
 
 ### 5. Critic & Reflection Loop
-- **Model**: `meta/llama-3.3-70b-instruct`.
+- **Model**: `nvidia/nemotron-3-super-120b-a12b`.
 - Acts as a risk and logic auditor. It scrutinizes the proposal against market principles (e.g., rejecting attempts to BUY when RSI > 70 without explosive volume, or buying an altcoin fighting negative BTC macro gravity).
 - **Reflection Loop**: If rejected, the critic sends targeted feedback back to the Strategist to replan. To prevent infinite loops, the system caps replanning at 2 iterations before forcing execution or fallback.
 
@@ -183,6 +204,11 @@ MATIS does not rely on a single, naive LLM prompt. Instead, it runs an orchestra
 
 ## Key Features
 
+- **Autonomous 5-Minute Evaluation Scheduler**: Built-in background loop continuously analyzes all supported assets (`BTC`, `ETH`, `SOL`, `XRP`, `BNB`, `LINK`) every 300 seconds.
+- **Semaphore-Throttled Concurrency**: Controlled by `asyncio.Semaphore(2)` (configurable) to prevent burst load or rate limit exhaustion against NVIDIA NIM and market APIs.
+- **Filtered Telegram Notifications**: Dispatches rich boardroom alerts *strictly* when an actionable `BUY` or `SELL` trade executes. All `HOLD` decisions are suppressed to keep notifications noise-free.
+- **Strict Executed Trade Counter**: The dashboard and API trade counters track *only* executed `BUY` and `SELL` transactions via `get_executed_trades_count()`, preventing metric inflation from `HOLD` evaluations.
+- **Dedicated Asset Column in Trade Ledger**: High-visibility, color-coded badges (`BTC`, `ETH`, `SOL`, `XRP`, `BNB`, `LINK`) identify every deliberation row, keeping the evaluated cryptocurrency clear even on `HOLD` records.
 - **Native INR Architecture**: Trades priced directly in Indian Rupees (`BTCINR`, `ETHINR`, `SOLINR`, `XRPINR`, `BNBINR`, `LINKINR`).
 - **Simulated CoinDCX Engine**: Rigidly enforces exchange-accurate constraints: ₹100 minimum trade limits and ~0.59% GST-inclusive transaction fees.
 - **USDT/INR Dynamic Fallback**: In the rare event an INR pair quote is delayed, the system calculates synthetic pricing using live CoinDCX `USDTINR` conversion rates.
@@ -190,7 +216,7 @@ MATIS does not rely on a single, naive LLM prompt. Instead, it runs an orchestra
 - **Continuous ML Data Logging**: Every trade deliberation (market condition, LLM reasoning chain, critic review, simulated fee, and net P&L) is saved to `matis_ml_training.db` for supervised fine-tuning and offline RL.
 - **Dual Execution Endpoints**: Dual-purpose `/api/evaluate/{asset}` endpoint supporting asynchronous fire-and-forget execution for the web dashboard (`mode=async`) and synchronous execution with full execution details for n8n/Telegram pipelines (`mode=sync`).
 - **Resilient Price Streamer**: Centralized price fetcher with exponential backoff on HTTP 429 rate limits, broadcasting tick data to web clients via WebSockets.
-- **Glassmorphic Dark-Mode Dashboard**: Lightweight Vanilla JS/HTML interface featuring live WebSocket tickers, interactive Chart.js equity curves, cost basis tracking, and filterable trade logs.
+- **Glassmorphic Dark-Mode Dashboard**: Lightweight Vanilla JS/HTML interface featuring live WebSocket tickers, on-demand `⚡ Analyze [Asset] Now` deliberation triggers, interactive Chart.js equity curves, cost basis tracking, and filterable trade logs.
 
 ---
 
@@ -256,33 +282,53 @@ matis_backend/
 
 ---
 
-## n8n Automation & Telegram Alerting
+## Autonomous Basket Scheduler & Concurrency Control
 
-MATIS includes a pre-built orchestration workflow in `n8n workflow.json`:
+MATIS v3 incorporates an autonomous scheduling engine (`autonomous_scheduler_loop()`) running as a native background daemon within the FastAPI lifespan:
 
-1. **Schedule Trigger**: Fires every **7 minutes**.
-2. **News Ingestion**: Ingests the latest crypto headlines from public RSS feeds (e.g., Decrypt).
-3. **Item Looping**: Batches each asset (`BTC`, `ETH`, `SOL`, etc.) with its corresponding news context.
-4. **Synchronous Brain Call**: Sends an HTTP POST request to:
-   ```
-   POST http://127.0.0.1:8000/api/evaluate/{{$json["asset"]}}?mode=sync
-   ```
-   *The server processes the LangGraph pipeline in a worker thread and keeps the HTTP request open until the trade settles.*
-5. **Telegram Dispatcher**: Formats a boardroom summary and dispatches an instant Telegram push notification:
+1. **Full Basket Evaluation**: Every 5 minutes (`AUTO_EVALUATE_INTERVAL_SECONDS=300`), the scheduler automatically kicks off a full deliberation round across all 6 supported assets (`BTC`, `ETH`, `SOL`, `XRP`, `BNB`, `LINK`).
+2. **Semaphore Throttling**: Rather than firing 6 heavy LLM requests simultaneously, deliberations run concurrently under an `asyncio.Semaphore(2)` (configurable via `MAX_CONCURRENT_EVALUATIONS`). This:
+   - Eliminates rate limit bursts against the NVIDIA NIM endpoint.
+   - Prevents temporary HTTP 503 ("Service temporarily overloaded") conditions.
+   - Avoids rate-limiting on CoinDCX and Binance public data feeds.
+3. **Automated Per-Asset News Scraping**: If an external news payload is not provided, the scheduler automatically scrapes real-time asset-specific news via Google News RSS and CoinGecko trending feeds before invoking the multi-agent deliberation pipeline.
 
-```text
-🚨 MATIS Boardroom Report 🚨
+---
 
-🧠 STRATEGIST (Proposal):
-BTC has broken above both 9 and 21 EMAs with RVOL at 2.1x. RSI sits at 54 (Mildly Bullish), supported by positive Bitcoin macro gravity (+3.2%). Proposing 15% allocation.
+## Filtered Telegram Alerting (BUY / SELL Only)
 
-📰 SENTINEL (News): 
-Sentiment Score: 0.72
+MATIS features integrated Telegram notifications dispatched directly from `send_telegram_alert()`:
 
-⚖️ RISK MANAGER (Execution):
-Action: BUY BTC at ₹8,420,150.00 worth ₹1,485.00
-Confidence: 85%
-```
+- **Strict Notification Policy**: Boardroom reports and push alerts are sent **strictly upon actionable `BUY` or `SELL` executions**.
+- **`HOLD` Suppression**: When the multi-agent committee decides on `HOLD` (or if confidence falls below dynamic risk manager targets), Telegram push notifications are completely suppressed. This guarantees that your Telegram channel remains a high-signal feed reserved for actual trading executions.
+- **Rich Message Content**: When an actionable trade occurs, a rich markdown boardroom report is delivered containing the Strategist's thesis, Sentinel's news sentiment, and the Risk Manager's exact execution fill details (price, units, simulated fees, and remaining cash).
+
+---
+
+## Trade Counter & Execution Semantics
+
+To ensure full transparency without confusing paper metrics:
+
+1. **Executed Trade Counter**:
+   - The primary metrics in the dashboard (the `#tradeCountBadge` and `#totalTrades` metric card) and backend responses (`total_trades` in `/api/portfolio_summary` and `executed_count` in `/api/trades`) are computed strictly using:
+     ```sql
+     SELECT COUNT(*) FROM trade_history WHERE action IN ('BUY', 'SELL')
+     ```
+   - Trade counts do **not** increment on `HOLD` evaluations.
+2. **Full Deliberation Auditability**:
+   - `HOLD` deliberations continue to be logged to SQLite (`trade_history` and `trade_logs`).
+   - The interactive dashboard table displays every evaluation round (with distinct badges for `▲ BUY`, `▼ SELL`, and `⏸ HOLD`), allowing full inspection of agent rationale, dynamic confidence thresholds, and risk decisions.
+
+---
+
+## n8n Automation & External Webhooks
+
+For external orchestration or custom scheduled jobs, MATIS includes a pre-built workflow in `n8n workflow.json`:
+
+1. **Schedule Trigger**: Can fire on any custom cron interval (e.g., every 7 minutes).
+2. **News Ingestion**: Ingests crypto headlines from public RSS feeds (Decrypt, CoinDesk, etc.).
+3. **Synchronous Webhook Call**: Dispatches a `POST` request to `/api/evaluate/{asset}?mode=sync`.
+4. **Custom Integrations**: Forward outputs to external spreadsheets, Discord webhooks, or secondary alerting channels.
 
 ---
 
@@ -292,16 +338,21 @@ Confidence: 85%
 - **Local Access**: Visit `http://localhost:8000` after launching the local server.
 
 - **WebSocket Price Banner**: Live streaming INR rates directly from CoinDCX tickers.
+- **On-Demand Evaluation**: Click `⚡ Analyze [Asset] Now` in the price banner to immediately evaluate the active asset without waiting for the background scheduler.
 - **Key Metrics Grid**:
   - Total Portfolio Valuation (Cash + Active Holdings marked-to-market).
   - Available Liquid INR Cash.
   - Multi-Asset Holding Distribution.
   - Global Net P&L (Split into Realized & Unrealized).
   - Selected Asset P&L with Average Entry Price and Cost Basis.
+  - Strict Executed Trade Count (reflecting filled `BUY` and `SELL` orders only).
 - **Chart.js Visualizations**:
   - **Portfolio Equity Curve**: Historical valuation timeline plotted from ML database snapshots.
   - **Asset Performance**: Net P&L attribution broken down by asset.
-- **Interactive Trade History**: Filterable by asset (`BTC`, `ETH`, `SOL`, `XRP`, `BNB`, `LINK`) and action (`BUY`, `SELL`, `HOLD`), displaying full LLM reasoning snippets and confidence indicators.
+- **Interactive Trade History Table**:
+  - **Dedicated Asset Column**: Color-coded badges (`BTC`, `ETH`, `SOL`, `XRP`, `BNB`, `LINK`) prominently identifying the cryptocurrency for every deliberation row.
+  - **Clear Size Separation**: Coin quantity displayed separately from the asset name (showing `—` for `HOLD` without hiding the coin identity).
+  - **Auditability**: Filterable by asset (`BTC`, `ETH`, `SOL`, `XRP`, `BNB`, `LINK`) and action (`BUY`, `SELL`, `HOLD`), displaying full LLM reasoning snippets and confidence indicators.
 - **Safe State Reset**: One-click portfolio wipe returning balance to ₹10,000 for fresh testing cycles.
 
 ---
@@ -349,7 +400,7 @@ Triggers the multi-agent pipeline for a specific asset (`BTC`, `ETH`, etc.).
 ```http
 GET /api/portfolio_summary
 ```
-Calculates mark-to-market valuations across all held assets using live CoinDCX prices.
+Calculates mark-to-market valuations across all held assets using live CoinDCX prices. Note that `total_trades` counts only executed `BUY` and `SELL` trades (excluding `HOLD`).
 - **Response**:
   ```json
   {
@@ -375,7 +426,29 @@ Returns cost basis, average entry price, and unrealized profit for a designated 
 ```http
 GET /api/trades?limit=50
 ```
-Returns recent trade execution records from `matis_paper_trading.db`.
+Returns recent trade records from `matis_paper_trading.db`.
+- **Response**:
+  ```json
+  {
+    "trades": [
+      {
+        "id": 1,
+        "timestamp": "2026-09-06T00:58:00+00:00",
+        "asset": "BTC",
+        "action": "HOLD",
+        "amount": 0.0,
+        "execution_price": 7941266.20,
+        "total_value_inr": 0.0,
+        "fee_inr": 0.0,
+        "confidence": 58,
+        "reasoning": "Confidence 58% < Dynamic Target 74% — forcing HOLD",
+        "realized_profit": 0.0
+      }
+    ],
+    "count": 1,
+    "executed_count": 0
+  }
+  ```
 
 #### 5. Machine Learning Trade Logs
 ```http
@@ -438,6 +511,26 @@ Connect to receive real-time JSON price updates streamed directly from the backg
 MATIS---Multi-Agent-Trading-Intelligence-System-Public/
 ├── README.md                     # Comprehensive project documentation
 ├── n8n workflow.json             # Automated news scraper & Telegram dispatch workflow
+├── docs/                         # Detailed modular technical documentation (9 chapters)
+│   ├── README.md                 # Documentation index & quick-start map
+│   ├── 01_overview.md            # Project overview & motivation
+│   ├── 02_system_architecture.md # Tiered architecture & component diagrams
+│   ├── 03_multi_agent_pipeline.md# LangGraph agent state graph deep dive
+│   ├── 04_exchange_simulation_and_accounting.md # CoinDCX INR fees & P&L formulas
+│   ├── 05_autonomous_scheduler_and_concurrency.md # 5-minute loop & semaphore throttling
+│   ├── 06_telemetry_and_alerting.md # Telegram filtering (BUY/SELL) & n8n setup
+│   ├── 07_web_dashboard.md       # Dashboard UI, color-coded badges & WebSocket feed
+│   ├── 08_api_reference.md       # REST & WebSocket endpoint specifications
+│   └── 09_testing_and_verification.md # Test suite architecture & isolation
+├── tests/                        # Full automated test suite (32 unit & integration tests)
+│   ├── __init__.py
+│   ├── conftest.py               # Database isolation fixtures & environment mocking
+│   ├── test_api.py               # FastAPI endpoint tests & executed trade count filters
+│   ├── test_database.py          # Portfolio ledger, P&L & BUY/SELL execution tests
+│   ├── test_indicators.py        # Technical indicators (RSI, ATR, BB, RVOL) & semantic layer
+│   ├── test_ml_database.py       # CoinDCX fees, ₹100 limits & ML logging tests
+│   ├── test_scheduler_semaphore.py # asyncio.Semaphore concurrency & basket loop tests
+│   └── test_telegram_filter.py   # Strict Telegram notification filter (BUY/SELL only)
 └── matis_backend/
     ├── main.py                   # FastAPI application, routes, lifespans & background tasks
     ├── graph.py                  # LangGraph state machine, nodes, routers & edges
@@ -461,9 +554,9 @@ MATIS---Multi-Agent-Trading-Intelligence-System-Public/
 
 ### Prerequisites
 - **Python**: Version 3.10 or higher.
-- **NVIDIA NIM API Key**: An active API key with access to `meta/llama-3.3-70b-instruct`. [Get your key here](https://build.nvidia.com/).
-- **n8n** *(Optional, for automation)*: Local or cloud instance of n8n.
-- **Telegram Bot** *(Optional, for notifications)*: Bot token and chat ID.
+- **NVIDIA NIM API Key**: An active API key with access to `nvidia/nemotron-3-super-120b-a12b` (or `meta/llama-3.3-70b-instruct`). [Get your key here](https://build.nvidia.com/).
+- **Telegram Bot** *(Optional, for instant BUY/SELL execution alerts)*: Bot token and chat ID.
+- **n8n** *(Optional, for external webhook triggers)*: Local or cloud instance of n8n.
 
 ---
 
@@ -472,7 +565,24 @@ MATIS---Multi-Agent-Trading-Intelligence-System-Public/
 Create a `.env` file inside the `matis_backend/` directory:
 
 ```env
+# ============================================================
+# [MANDATORY] NVIDIA NIM API Key & Model Configuration
+# ============================================================
 NVIDIA_API_KEY=nvapi-your-actual-nvidia-nim-api-key-here
+NVIDIA_MODEL=nvidia/nemotron-3-super-120b-a12b
+
+# ============================================================
+# [OPTIONAL] Autonomous Multi-Asset Evaluation Loop
+# ============================================================
+AUTO_TRADING=true
+AUTO_EVALUATE_INTERVAL_SECONDS=300
+MAX_CONCURRENT_EVALUATIONS=2
+
+# ============================================================
+# [OPTIONAL] Telegram Alerts (Filtered: BUY / SELL only)
+# ============================================================
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+TELEGRAM_CHAT_ID=your-telegram-chat-id
 ```
 
 ---
@@ -513,6 +623,26 @@ NVIDIA_API_KEY=nvapi-your-actual-nvidia-nim-api-key-here
 
 5. **Open the Dashboard:**
    Navigate to [http://localhost:8000](http://localhost:8000) in your browser.
+
+---
+
+### Running the Test Suite
+
+MATIS includes a comprehensive automated test suite covering indicator math, paper portfolio accounting, CoinDCX fee rules, Telegram alert filtering, and API endpoints.
+
+All tests run in isolated temporary SQLite databases so your active paper trading ledger is never modified or reset.
+
+Run the test suite from the repository root:
+
+```bash
+# Run all tests with verbose output
+pytest -v
+
+# Run a specific test module
+pytest tests/test_database.py -v
+pytest tests/test_telegram_filter.py -v
+pytest tests/test_api.py -v
+```
 
 ---
 

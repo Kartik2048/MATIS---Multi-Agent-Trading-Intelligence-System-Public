@@ -270,6 +270,22 @@ def get_trade_history(limit: int = 50) -> list:
     return [dict(r) for r in rows]
 
 
+def get_executed_trades_count(asset: str = None) -> int:
+    """Return the count of executed BUY and SELL trades (excluding HOLD)."""
+    conn = get_connection()
+    if asset:
+        row = conn.execute(
+            "SELECT COUNT(*) as count FROM trade_history WHERE action IN ('BUY', 'SELL') AND asset = ?",
+            (asset,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) as count FROM trade_history WHERE action IN ('BUY', 'SELL')"
+        ).fetchone()
+    conn.close()
+    return row["count"] if row else 0
+
+
 def reset_portfolio():
     """Reset everything back to initial balance with zero holdings."""
     conn = get_connection()
