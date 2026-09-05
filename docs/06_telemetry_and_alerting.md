@@ -94,8 +94,8 @@ For external scheduling or integration with secondary data pipelines, MATIS incl
 Add your Telegram bot credentials to `matis_backend/.env`:
 
 ```env
-TELEGRAM_BOT_TOKEN=8631605373:AAFRiA3pcTykzbv2rn80jniO1UzWR56bQkc
-TELEGRAM_CHAT_ID=1706651387
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
 ```
 
 ### How to Get Credentials:
