@@ -1,4 +1,14 @@
 # main.py — MATIS v3: CoinDCX INR Simulation + ML Logging + WebSocket + Async Pipeline
+import sys
+import os
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 import asyncio
 from contextlib import asynccontextmanager
 

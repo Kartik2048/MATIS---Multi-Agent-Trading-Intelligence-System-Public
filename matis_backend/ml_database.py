@@ -1,6 +1,15 @@
 # ml_database.py — CoinDCX INR Simulation & ML Training Data Logger
-import sqlite3
+import sys
 import os
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+import sqlite3
 from datetime import datetime, timezone
 
 ML_DB_PATH = os.path.join(os.path.dirname(__file__), "matis_ml_training.db")

@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from state import AgentState
 
-# Load API keys from .env
+# Load API keys from .env (checks both local module folder and root)
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 load_dotenv()
 
 # --- SCHEMA DEFINITIONS ---
@@ -24,24 +25,25 @@ class TradeProposal(BaseModel):
 
 
 # --- LLM INITIALIZATION (NVIDIA NIM) ---
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b")
 
-# BRAIN 1: The Heavyweight (Strategist + Critic)
+# BRAIN 1: The Heavyweight (Strategist)
 llm_strategist = ChatNVIDIA(
-    model="meta/llama-3.3-70b-instruct",
+    model=NVIDIA_MODEL,
     temperature=0.1,
     api_key=os.getenv("NVIDIA_API_KEY")
 )
 
 # BRAIN 2: The Fast Checker (Sentinel — news parsing)
 llm_sentinel = ChatNVIDIA(
-    model="meta/llama-3.3-70b-instruct",
+    model=NVIDIA_MODEL,
     temperature=0.2,
     api_key=os.getenv("NVIDIA_API_KEY")
 )
 
-# Critic uses the same heavyweight model but invoked raw (no structured output)
+# Critic uses the same model invoked raw (no structured output)
 llm_critic = ChatNVIDIA(
-    model="meta/llama-3.3-70b-instruct",
+    model=NVIDIA_MODEL,
     temperature=0.1,
     api_key=os.getenv("NVIDIA_API_KEY")
 )

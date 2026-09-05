@@ -1,6 +1,15 @@
 # database.py — Multi-Asset Paper Trading Database
-import sqlite3
+import sys
 import os
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+import sqlite3
 from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "matis_paper_trading.db")

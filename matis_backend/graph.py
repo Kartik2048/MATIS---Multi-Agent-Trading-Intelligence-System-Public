@@ -20,6 +20,9 @@ def semantic_builder_node(state: AgentState):
     return {"semantic_payload": payload}
 
 
+from price_feed import get_inr_price, get_usd_to_inr_rate
+
+
 def check_trade_value(state: AgentState) -> str:
     """
     Evaluates if the Strategist's proposed trade meets the minimum CoinDCX ₹100 INR threshold.
@@ -35,6 +38,7 @@ def check_trade_value(state: AgentState) -> str:
     portfolio = state.get("portfolio", {})
     inr_balance = portfolio.get("inr_balance", 0.0)
     asset_balance = portfolio.get("asset_balance", 0.0)
+    asset = state.get("asset", "")
     
     market_data = state.get("market_data", {})
     price = market_data.get("price", 0.0)
@@ -46,7 +50,10 @@ def check_trade_value(state: AgentState) -> str:
     if action == "BUY":
         trade_value = inr_balance * allocation_fraction
     elif action == "SELL":
-        trade_value = (asset_balance * allocation_fraction) * price
+        inr_p = get_inr_price(asset)
+        if inr_p <= 0:
+            inr_p = price * get_usd_to_inr_rate()
+        trade_value = (asset_balance * allocation_fraction) * inr_p
         
     if trade_value < 100.0:
         print(f"Graph Router: Bypassing Critic! Proposed {action} value (₹{trade_value:.2f}) is below CoinDCX minimum of ₹100.")
